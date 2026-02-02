@@ -401,6 +401,122 @@ console.log(out.output?.body?.text ?? "");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn js_repl_view_image_tool_attaches_multiple_local_images() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        config.features.enable(Feature::JsRepl);
+    });
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder.build(&server).await?;
+
+    let call_id = "js-repl-view-image-two";
+    let js_input = r#"
+const fs = await import("node:fs/promises");
+const path = await import("node:path");
+const png = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+  "base64"
+);
+const imagePathA = path.join(codex.tmpDir, "js-repl-view-image-a.png");
+const imagePathB = path.join(codex.tmpDir, "js-repl-view-image-b.png");
+await fs.writeFile(imagePathA, png);
+await fs.writeFile(imagePathB, png);
+await codex.tool("view_image", { path: imagePathA });
+await codex.tool("view_image", { path: imagePathB });
+console.log("attached-two-images");
+"#;
+
+    let first_response = sse(vec![
+        ev_response_created("resp-1"),
+        ev_custom_tool_call(call_id, "js_repl", js_input),
+        ev_completed("resp-1"),
+    ]);
+    responses::mount_sse_once(&server, first_response).await;
+
+    let second_response = sse(vec![
+        ev_assistant_message("msg-1", "done"),
+        ev_completed("resp-2"),
+    ]);
+    let mock = responses::mount_sse_once(&server, second_response).await;
+
+    let session_model = session_configured.model.clone();
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "use js_repl to write two images and attach them".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event_with_timeout(
+        &codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    let req = mock.single_request();
+    let (js_repl_output, js_repl_success) = req
+        .custom_tool_call_output_content_and_success(call_id)
+        .expect("custom tool output present");
+    let js_repl_output = js_repl_output.expect("custom tool output text present");
+    assert_ne!(
+        js_repl_success,
+        Some(false),
+        "js_repl call failed unexpectedly: {js_repl_output}"
+    );
+    assert!(
+        js_repl_output.contains("attached-two-images"),
+        "expected js_repl output marker, got {js_repl_output}"
+    );
+
+    let body = req.body_json();
+    let image_messages = image_messages(&body);
+    assert_eq!(
+        image_messages.len(),
+        2,
+        "js_repl should inject one pending input image message per nested view_image call"
+    );
+    for image_message in image_messages {
+        let image_url = image_message
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| {
+                content.iter().find_map(|span| {
+                    if span.get("type").and_then(Value::as_str) == Some("input_image") {
+                        span.get("image_url").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .expect("image_url present");
+        assert!(
+            image_url.starts_with("data:image/png;base64,"),
+            "expected png data URL, got {image_url}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn view_image_tool_errors_when_path_is_directory() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
