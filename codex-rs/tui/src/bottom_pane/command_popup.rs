@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_command_hidden_when_audio_device_selection_is_disabled() {
+    fn settings_command_hidden_when_audio_device_selection_is_disabled() {
         let mut popup = CommandPopup::new(
             Vec::new(),
             CommandPopupFlags {
@@ -608,8 +608,8 @@ mod tests {
             .collect();
 
         assert!(
-            !cmds.contains(&"audio"),
-            "expected '/audio' to be hidden when audio device selection is disabled, got {cmds:?}"
+            !cmds.contains(&"settings"),
+            "expected '/settings' to be hidden when audio device selection is disabled, got {cmds:?}"
         );
     }
 

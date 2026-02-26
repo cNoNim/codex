@@ -43,7 +43,6 @@ impl RealtimeAudioDeviceKind {
         }
     }
 
-    #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
     pub(crate) fn noun(self) -> &'static str {
         match self {
             Self::Microphone => "microphone",
@@ -195,14 +194,12 @@ pub(crate) enum AppEvent {
     },
 
     /// Persist the selected realtime microphone or speaker to top-level config.
-    #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
     PersistRealtimeAudioDeviceSelection {
         kind: RealtimeAudioDeviceKind,
         name: Option<String>,
     },
 
     /// Restart the selected realtime microphone or speaker locally.
-    #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
     RestartRealtimeAudioDevice {
         kind: RealtimeAudioDeviceKind,
     },

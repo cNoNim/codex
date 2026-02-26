@@ -3547,7 +3547,7 @@ impl ChatWidget {
                     self.start_realtime_conversation();
                 }
             }
-            SlashCommand::Audio => {
+            SlashCommand::Settings => {
                 if !self.realtime_audio_device_selection_enabled() {
                     return;
                 }
@@ -6837,9 +6837,8 @@ impl ChatWidget {
             .unwrap_or_else(|| self.current_collaboration_mode.model())
     }
 
-    #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
     pub(crate) fn realtime_conversation_is_live(&self) -> bool {
-        self.realtime_conversation.is_live()
+        self.realtime_conversation.is_active()
     }
 
     fn current_realtime_audio_device_name(&self, kind: RealtimeAudioDeviceKind) -> Option<String> {

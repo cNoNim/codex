@@ -27,7 +27,7 @@ pub(crate) fn builtins_for_input(
         .filter(|(_, cmd)| connectors_enabled || *cmd != SlashCommand::Apps)
         .filter(|(_, cmd)| personality_command_enabled || *cmd != SlashCommand::Personality)
         .filter(|(_, cmd)| realtime_conversation_enabled || *cmd != SlashCommand::Realtime)
-        .filter(|(_, cmd)| audio_device_selection_enabled || *cmd != SlashCommand::Audio)
+        .filter(|(_, cmd)| audio_device_selection_enabled || *cmd != SlashCommand::Settings)
         .collect()
 }
 
@@ -104,17 +104,17 @@ mod tests {
     }
 
     #[test]
-    fn audio_command_is_hidden_when_realtime_is_disabled() {
+    fn settings_command_is_hidden_when_realtime_is_disabled() {
         assert_eq!(
-            find_builtin_command("audio", true, true, true, false, false, false),
+            find_builtin_command("settings", true, true, true, false, false, false),
             None
         );
     }
 
     #[test]
-    fn audio_command_is_hidden_when_audio_device_selection_is_disabled() {
+    fn settings_command_is_hidden_when_audio_device_selection_is_disabled() {
         assert_eq!(
-            find_builtin_command("audio", true, true, true, true, false, false),
+            find_builtin_command("settings", true, true, true, true, false, false),
             None
         );
     }

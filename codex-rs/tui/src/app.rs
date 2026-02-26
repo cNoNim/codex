@@ -2449,7 +2449,6 @@ impl App {
                     }
                 }
             }
-            #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
             AppEvent::PersistRealtimeAudioDeviceSelection { kind, name } => {
                 let builder = match kind {
                     RealtimeAudioDeviceKind::Microphone => {
@@ -2497,7 +2496,6 @@ impl App {
                     }
                 }
             }
-            #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
             AppEvent::RestartRealtimeAudioDevice { kind } => {
                 self.chat_widget.restart_realtime_audio_device(kind);
             }
