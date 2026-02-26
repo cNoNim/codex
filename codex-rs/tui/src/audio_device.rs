@@ -112,12 +112,18 @@ fn default_config(
 fn missing_device_error(kind: RealtimeAudioDeviceKind, configured_name: Option<&str>) -> String {
     match (kind, configured_name) {
         (RealtimeAudioDeviceKind::Microphone, Some(name)) => {
-            format!("configured microphone `{name}` was unavailable and no default input audio device was found")
+            format!(
+                "configured microphone `{name}` was unavailable and no default input audio device was found"
+            )
         }
         (RealtimeAudioDeviceKind::Speaker, Some(name)) => {
-            format!("configured speaker `{name}` was unavailable and no default output audio device was found")
+            format!(
+                "configured speaker `{name}` was unavailable and no default output audio device was found"
+            )
         }
-        (RealtimeAudioDeviceKind::Microphone, None) => "no input audio device available".to_string(),
+        (RealtimeAudioDeviceKind::Microphone, None) => {
+            "no input audio device available".to_string()
+        }
         (RealtimeAudioDeviceKind::Speaker, None) => "no output audio device available".to_string(),
     }
 }

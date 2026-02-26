@@ -1,8 +1,8 @@
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
+use crate::app_event::ExitMode;
 #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
 use crate::app_event::RealtimeAudioDeviceKind;
-use crate::app_event::ExitMode;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_event_sender::AppEventSender;
@@ -2472,7 +2472,8 @@ impl App {
                                 self.config.realtime_audio.speaker = name.clone();
                             }
                         }
-                        self.chat_widget.set_realtime_audio_device(kind, name.clone());
+                        self.chat_widget
+                            .set_realtime_audio_device(kind, name.clone());
 
                         if self.chat_widget.realtime_conversation_is_live() {
                             self.chat_widget.open_realtime_audio_restart_prompt(kind);
