@@ -14,6 +14,8 @@ use codex_core::config::types::McpServerTransportConfig;
 use codex_core::mcp::auth::McpOAuthLoginSupport;
 use codex_core::mcp::auth::compute_auth_statuses;
 use codex_core::mcp::auth::oauth_login_support;
+use codex_core::mcp::effective_mcp_servers;
+use codex_core::plugins::PluginsManager;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_rmcp_client::delete_oauth_tokens;
 use codex_rmcp_client::perform_oauth_login;
@@ -327,10 +329,12 @@ async fn run_login(config_overrides: &CliConfigOverrides, login_args: LoginArgs)
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
+    let plugins_manager = PluginsManager::new(config.codex_home.clone());
+    let mcp_servers = effective_mcp_servers(&config, None, &plugins_manager);
 
     let LoginArgs { name, scopes } = login_args;
 
-    let Some(server) = config.mcp_servers.get().get(&name) else {
+    let Some(server) = mcp_servers.get(&name) else {
         bail!("No MCP server named '{name}' found.");
     };
 
@@ -371,12 +375,12 @@ async fn run_logout(config_overrides: &CliConfigOverrides, logout_args: LogoutAr
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
+    let plugins_manager = PluginsManager::new(config.codex_home.clone());
+    let mcp_servers = effective_mcp_servers(&config, None, &plugins_manager);
 
     let LogoutArgs { name } = logout_args;
 
-    let server = config
-        .mcp_servers
-        .get()
+    let server = mcp_servers
         .get(&name)
         .ok_or_else(|| anyhow!("No MCP server named '{name}' found in configuration."))?;
 
@@ -401,14 +405,13 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
+    let plugins_manager = PluginsManager::new(config.codex_home.clone());
+    let mcp_servers = effective_mcp_servers(&config, None, &plugins_manager);
 
-    let mut entries: Vec<_> = config.mcp_servers.iter().collect();
+    let mut entries: Vec<_> = mcp_servers.iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let auth_statuses = compute_auth_statuses(
-        config.mcp_servers.iter(),
-        config.mcp_oauth_credentials_store_mode,
-    )
-    .await;
+    let auth_statuses =
+        compute_auth_statuses(mcp_servers.iter(), config.mcp_oauth_credentials_store_mode).await;
 
     if list_args.json {
         let json_entries: Vec<_> = entries
@@ -651,8 +654,10 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
+    let plugins_manager = PluginsManager::new(config.codex_home.clone());
+    let mcp_servers = effective_mcp_servers(&config, None, &plugins_manager);
 
-    let Some(server) = config.mcp_servers.get().get(&get_args.name) else {
+    let Some(server) = mcp_servers.get(&get_args.name) else {
         bail!("No MCP server named '{name}' found.", name = get_args.name);
     };
 
