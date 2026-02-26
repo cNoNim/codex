@@ -1,0 +1,154 @@
+name: cnonim-fork-state
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  update-state-tag:
+    if: github.repository == 'cNoNim/codex'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PATCH_SOURCE_REF: origin/main
+      LAST_TAG: fork/last
+      BEFORE_TAG: fork/before
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Update patch state tag
+        shell: sh
+        run: |
+          set -eu
+
+          normalize_value() {
+            tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+          }
+
+          read_commit_trailer() {
+            trailer_commit_sha="${1}"
+            trailer_key="${2}"
+            git show -s --format="%(trailers:key=${trailer_key},valueonly)" "${trailer_commit_sha}" | normalize_value
+          }
+
+          find_initial_marker() {
+            marker_scan_file="$(mktemp)"
+            git rev-list "${PATCH_SOURCE_REF}" > "${marker_scan_file}"
+
+            initial_marker_sha=""
+            while IFS= read -r sha; do
+              [ -z "${sha}" ] && continue
+              if [ "$(read_commit_trailer "${sha}" "Initial")" = "yes" ]; then
+                initial_marker_sha="${sha}"
+                break
+              fi
+            done < "${marker_scan_file}"
+            rm -f "${marker_scan_file}"
+
+            if [ -z "${initial_marker_sha}" ]; then
+              echo "Required trailer 'Initial: yes' was not found in ${PATCH_SOURCE_REF} history."
+              exit 1
+            fi
+
+            printf '%s\n' "${initial_marker_sha}"
+          }
+
+          resolve_range_start() {
+            tagged_start="$(git rev-parse "${BEFORE_TAG}^{commit}" 2>/dev/null || true)"
+            if [ -n "${tagged_start}" ]; then
+              if git merge-base --is-ancestor "${tagged_start}" "${PATCH_SOURCE_REF}"; then
+                echo "Using ${BEFORE_TAG} at ${tagged_start}" >&2
+                printf '%s\n' "${tagged_start}"
+                return 0
+              fi
+              echo "${BEFORE_TAG} is stale for ${PATCH_SOURCE_REF}; falling back to Initial marker scan" >&2
+            fi
+
+            initial_marker_sha="$(find_initial_marker)"
+            initial_parent="$(git rev-parse "${initial_marker_sha}^" 2>/dev/null || true)"
+            if [ -n "${initial_parent}" ]; then
+              range_start="${initial_parent}"
+            else
+              range_start="${initial_marker_sha}"
+            fi
+
+            echo "Resolved range start via Initial marker: ${range_start}" >&2
+            printf '%s\n' "${range_start}"
+          }
+
+          update_range_start_tag_if_needed() {
+            desired_start="${1}"
+            current_start="$(git rev-parse "${BEFORE_TAG}^{commit}" 2>/dev/null || true)"
+
+            if [ "${current_start}" = "${desired_start}" ]; then
+              echo "${BEFORE_TAG} already points to ${desired_start}"
+              return 0
+            fi
+
+            git tag -a -f "${BEFORE_TAG}" \
+              -m "Fork patch range start" \
+              -m "Range-Start: ${desired_start}"
+            git push origin "refs/tags/${BEFORE_TAG}" --force
+            echo "Updated ${BEFORE_TAG} -> ${desired_start}"
+          }
+
+          collect_patch_set_hash() {
+            range_start="${1}"
+            patch_ids_file="$(mktemp)"
+            commits_file="$(mktemp)"
+
+            git rev-list --reverse "${range_start}..${PATCH_SOURCE_REF}" > "${commits_file}"
+            while IFS= read -r sha; do
+              [ -z "${sha}" ] && continue
+              if [ "$(read_commit_trailer "${sha}" "Fork-Patch")" = "yes" ]; then
+                patch_id="$(git show "${sha}" | git patch-id --stable | awk '{print $1}')"
+                if [ -n "${patch_id}" ]; then
+                  echo "${patch_id}" >> "${patch_ids_file}"
+                else
+                  echo "empty:${sha}" >> "${patch_ids_file}"
+                fi
+              fi
+            done < "${commits_file}"
+            rm -f "${commits_file}"
+
+            patch_set_hash="$(sort "${patch_ids_file}" | sha256sum | awk '{print $1}')"
+            rm -f "${patch_ids_file}"
+            printf '%s\n' "${patch_set_hash}"
+          }
+
+          read_tag_trailer() {
+            trailer_tag="${1}"
+            trailer_key="${2}"
+            git for-each-ref "refs/tags/${trailer_tag}" --format="%(contents:trailers:key=${trailer_key},valueonly)" | normalize_value
+          }
+
+          git fetch origin main --force
+          git fetch origin --tags --force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          range_start_commit="$(resolve_range_start)"
+          update_range_start_tag_if_needed "${range_start_commit}"
+
+          patch_set_hash="$(collect_patch_set_hash "${range_start_commit}")"
+          current_hash="$(read_tag_trailer "${LAST_TAG}" "Patch-Set-Hash")"
+
+          if [ -n "${current_hash}" ] && [ "${current_hash}" = "${patch_set_hash}" ]; then
+            echo "Patch state is unchanged: ${patch_set_hash}"
+            exit 0
+          fi
+
+          git tag -a -f "${LAST_TAG}" \
+            -m "Fork patch state" \
+            -m "Patch-Set-Hash: ${patch_set_hash}"
+          git push origin "refs/tags/${LAST_TAG}" --force
+          echo "Updated ${LAST_TAG} -> ${patch_set_hash}"

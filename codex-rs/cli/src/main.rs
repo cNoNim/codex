@@ -50,13 +50,19 @@ use codex_core::features::Stage;
 use codex_core::features::is_known_feature_key;
 use codex_core::terminal::TerminalName;
 
+#[cfg(fork_cnonim)]
+const CODEX_CLI_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("CODEX_FORK_SUFFIX"));
+
+#[cfg(not(fork_cnonim))]
+const CODEX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Codex CLI
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = CODEX_CLI_VERSION,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
