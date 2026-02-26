@@ -5415,7 +5415,6 @@ impl ChatWidget {
         });
     }
 
-    #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
     pub(crate) fn open_realtime_audio_restart_prompt(&mut self, kind: RealtimeAudioDeviceKind) {
         let restart_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
             tx.send(AppEvent::RestartRealtimeAudioDevice { kind });
@@ -6797,7 +6796,6 @@ impl ChatWidget {
         self.config.personality = Some(personality);
     }
 
-    #[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
     pub(crate) fn set_realtime_audio_device(
         &mut self,
         kind: RealtimeAudioDeviceKind,
