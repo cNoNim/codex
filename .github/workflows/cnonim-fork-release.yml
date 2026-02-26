@@ -1,0 +1,679 @@
+name: cnonim-fork-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream tag (format: rust-vN.M.P)"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  check-release:
+    if: github.repository == 'cNoNim/codex'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.resolve.outputs.should_run }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      upstream_version: ${{ steps.resolve.outputs.upstream_version }}
+    steps:
+      - name: Resolve release target
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          LAST_TAG: fork/last
+        shell: sh
+        run: |
+          set -eu
+
+          normalize_value() {
+            tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+          }
+
+          get_annotated_tag_message() {
+            target_tag="${1}"
+            tag_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${target_tag}" --jq '.object.type' 2>/dev/null || true)"
+            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${target_tag}" --jq '.object.sha' 2>/dev/null || true)"
+            if [ "${tag_type}" != "tag" ] || [ -z "${tag_sha}" ]; then
+              return 1
+            fi
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.message' 2>/dev/null
+          }
+
+          read_tag_trailer() {
+            trailer_tag="${1}"
+            trailer_key="${2}"
+            tag_message="$(get_annotated_tag_message "${trailer_tag}" || true)"
+            if [ -z "${tag_message}" ]; then
+              printf '\n'
+              return 0
+            fi
+
+            trailer_value="$(
+              printf '%s\n' "${tag_message}" \
+                | awk -v key="${trailer_key}" '
+                    {
+                      line = $0
+                      split(line, parts, ":")
+                      lhs = parts[1]
+                      gsub(/^[[:space:]]+|[[:space:]]+$/, "", lhs)
+                      if (tolower(lhs) == tolower(key)) {
+                        sub(/^[^:]*:[[:space:]]*/, "", line)
+                        print line
+                        exit
+                      }
+                    }' \
+                | normalize_value
+            )"
+            printf '%s\n' "${trailer_value}"
+          }
+
+          resolve_latest_fork_tag_for_upstream() {
+            upstream_tag_value="${1}"
+            tag_prefix="fork/${upstream_tag_value}-"
+            tags_file="$(mktemp)"
+            if ! gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${tag_prefix}" --jq '.[].ref' > "${tags_file}" 2>/dev/null; then
+              rm -f "${tags_file}"
+              printf '\n'
+              return 0
+            fi
+
+            latest_tag=""
+            latest_suffix="-1"
+            while IFS= read -r ref; do
+              [ -z "${ref}" ] && continue
+              tag="${ref#refs/tags/}"
+              suffix="${tag#${tag_prefix}}"
+              case "${suffix}" in
+                ''|*[!0-9]*) continue ;;
+              esac
+
+              if [ "${suffix}" -gt "${latest_suffix}" ]; then
+                latest_suffix="${suffix}"
+                latest_tag="${tag}"
+              fi
+            done < "${tags_file}"
+            rm -f "${tags_file}"
+
+            printf '%s\n' "${latest_tag}"
+          }
+
+          release_has_required_assets() {
+            release_tag="${1}"
+            assets_file="$(mktemp)"
+            if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" --jq '.assets[].name' > "${assets_file}" 2>/dev/null; then
+              rm -f "${assets_file}"
+              return 1
+            fi
+
+            has_macos="false"
+            has_linux="false"
+            if grep -qx 'codex-cnonim-aarch64-apple-darwin.tar.gz' "${assets_file}"; then
+              has_macos="true"
+            fi
+            if grep -qx 'codex-cnonim-x86_64-unknown-linux-gnu.tar.gz' "${assets_file}"; then
+              has_linux="true"
+            fi
+            rm -f "${assets_file}"
+
+            if [ "${has_macos}" = "true" ] && [ "${has_linux}" = "true" ]; then
+              return 0
+            fi
+            return 1
+          }
+
+          resolve_should_run() {
+            latest_fork_tag_value="${1}"
+            should_run="true"
+            reason=""
+
+            if [ -z "${latest_fork_tag_value}" ]; then
+              should_run="true"
+              reason="no fork release tags found for ${upstream_tag}"
+              return 0
+            fi
+
+            current_patch_hash="$(read_tag_trailer "${LAST_TAG}" "Patch-Set-Hash")"
+            released_patch_hash="$(read_tag_trailer "${latest_fork_tag_value}" "Patch-Set-Hash")"
+
+            if [ -z "${current_patch_hash}" ]; then
+              should_run="true"
+              reason="state tag ${LAST_TAG} has no Patch-Set-Hash"
+              return 0
+            fi
+            if [ -z "${released_patch_hash}" ]; then
+              should_run="true"
+              reason="release tag ${latest_fork_tag_value} has no Patch-Set-Hash"
+              return 0
+            fi
+            if [ "${current_patch_hash}" != "${released_patch_hash}" ]; then
+              should_run="true"
+              reason="patch set changed: ${released_patch_hash} -> ${current_patch_hash}"
+              return 0
+            fi
+            if release_has_required_assets "${latest_fork_tag_value}"; then
+              should_run="false"
+              reason="skip: release ${latest_fork_tag_value} already matches patch set and has required assets"
+              return 0
+            fi
+
+            should_run="true"
+            reason="release ${latest_fork_tag_value} is missing required assets"
+          }
+
+          upstream_tag="${INPUT_UPSTREAM_TAG:-}"
+          if [ -z "${upstream_tag}" ]; then
+            upstream_tag="$(gh api repos/openai/codex/releases/latest --jq '.tag_name')"
+          fi
+
+          case "${upstream_tag}" in
+            rust-v*) ;;
+            *)
+              echo "Invalid upstream tag: ${upstream_tag}"
+              exit 1
+              ;;
+          esac
+
+          upstream_version="${upstream_tag#rust-v}"
+          latest_fork_tag="$(resolve_latest_fork_tag_for_upstream "${upstream_tag}")"
+          resolve_should_run "${latest_fork_tag}"
+
+          echo "should_run=${should_run}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_version=${upstream_version}" >> "${GITHUB_OUTPUT}"
+          echo "Decision: ${reason}"
+
+  prepare:
+    needs: check-release
+    if: needs.check-release.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      UPSTREAM_TAG: ${{ needs.check-release.outputs.upstream_tag }}
+      PATCH_SOURCE_REF: origin/main
+      BEFORE_TAG: fork/before
+    outputs:
+      should_build: ${{ steps.prepare.outputs.should_build }}
+      mode: ${{ steps.prepare.outputs.mode }}
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
+      fork_suffix: ${{ steps.prepare.outputs.fork_suffix }}
+      patch_source_ref: ${{ steps.prepare.outputs.patch_source_ref }}
+      patch_source_head: ${{ steps.prepare.outputs.patch_source_head }}
+      patch_set_hash: ${{ steps.prepare.outputs.patch_set_hash }}
+      build_matrix: ${{ steps.prepare.outputs.build_matrix }}
+      reason: ${{ steps.prepare.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Prepare source and resolve tag mode
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: sh
+        run: |
+          set -eu
+
+          normalize_value() {
+            tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+          }
+
+          read_commit_trailer() {
+            trailer_commit_sha="${1}"
+            trailer_key="${2}"
+            git show -s --format="%(trailers:key=${trailer_key},valueonly)" "${trailer_commit_sha}" | normalize_value
+          }
+
+          find_initial_marker() {
+            marker_scan_file="$(mktemp)"
+            git rev-list "${PATCH_SOURCE_REF}" > "${marker_scan_file}"
+
+            initial_marker_sha=""
+            while IFS= read -r sha; do
+              [ -z "${sha}" ] && continue
+              if [ "$(read_commit_trailer "${sha}" "Initial")" = "yes" ]; then
+                initial_marker_sha="${sha}"
+                break
+              fi
+            done < "${marker_scan_file}"
+            rm -f "${marker_scan_file}"
+
+            if [ -z "${initial_marker_sha}" ]; then
+              echo "Required trailer 'Initial: yes' was not found in ${PATCH_SOURCE_REF} history."
+              echo "Add a base commit marker with trailer 'Initial: yes' and rerun."
+              exit 1
+            fi
+
+            printf '%s\n' "${initial_marker_sha}"
+          }
+
+          resolve_range_start() {
+            tagged_start="$(git rev-parse "${BEFORE_TAG}^{commit}" 2>/dev/null || true)"
+            if [ -n "${tagged_start}" ]; then
+              if git merge-base --is-ancestor "${tagged_start}" "${PATCH_SOURCE_REF}"; then
+                echo "Using ${BEFORE_TAG} at ${tagged_start}" >&2
+                printf '%s\n' "${tagged_start}"
+                return 0
+              fi
+              echo "${BEFORE_TAG} is stale for ${PATCH_SOURCE_REF}; falling back to Initial marker scan" >&2
+            fi
+
+            initial_marker_sha="$(find_initial_marker)"
+            initial_parent="$(git rev-parse "${initial_marker_sha}^" 2>/dev/null || true)"
+            if [ -n "${initial_parent}" ]; then
+              range_start="${initial_parent}"
+            else
+              range_start="${initial_marker_sha}"
+            fi
+            echo "Resolved range start via Initial marker: ${range_start}" >&2
+            printf '%s\n' "${range_start}"
+          }
+
+          apply_fork_patches_and_hash() {
+            range_start="${1}"
+            commits_file="$(mktemp)"
+            patch_ids_file="$(mktemp)"
+
+            git rev-list --reverse "${range_start}..${PATCH_SOURCE_REF}" > "${commits_file}"
+            while IFS= read -r sha; do
+              [ -z "${sha}" ] && continue
+              if [ "$(read_commit_trailer "${sha}" "Fork-Patch")" = "yes" ]; then
+                patch_id="$(git show "${sha}" | git patch-id --stable | awk '{print $1}')"
+                if [ -n "${patch_id}" ]; then
+                  echo "${patch_id}" >> "${patch_ids_file}"
+                else
+                  echo "empty:${sha}" >> "${patch_ids_file}"
+                fi
+                echo "Cherry-picking ${sha}"
+                git cherry-pick -x --empty=drop "${sha}"
+              fi
+            done < "${commits_file}"
+            rm -f "${commits_file}"
+
+            patch_set_hash="$(sort "${patch_ids_file}" | sha256sum | awk '{print $1}')"
+            rm -f "${patch_ids_file}"
+            printf '%s\n' "${patch_set_hash}"
+          }
+
+          read_tag_trailer() {
+            trailer_tag="${1}"
+            trailer_key="${2}"
+            git for-each-ref "refs/tags/${trailer_tag}" --format="%(contents:trailers:key=${trailer_key},valueonly)" | normalize_value
+          }
+
+          setup_release_branch() {
+            git fetch --force --depth=1 https://github.com/openai/codex.git "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+            git fetch origin main --force
+            git fetch origin --tags --force
+            git checkout -B fork-release "${UPSTREAM_TAG}"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          }
+
+          resolve_patch_context() {
+            patch_source_head="$(git rev-parse "${PATCH_SOURCE_REF}")"
+            range_start_commit="$(resolve_range_start)"
+            patch_set_hash="$(apply_fork_patches_and_hash "${range_start_commit}")"
+            candidate_tree="$(git rev-parse HEAD^{tree})"
+          }
+
+          resolve_existing_release_state() {
+            next_seq=0
+            duplicate_tag=""
+            tag_prefix="fork/${UPSTREAM_TAG}-"
+            tags_file="$(mktemp)"
+            git tag -l "${tag_prefix}*" > "${tags_file}"
+            while IFS= read -r tag; do
+              [ -z "${tag}" ] && continue
+
+              suffix="${tag#${tag_prefix}}"
+              if [ "${suffix}" != "${tag}" ]; then
+                case "${suffix}" in
+                  ''|*[!0-9]*) ;;
+                  *)
+                    if [ "${suffix}" -ge "${next_seq}" ]; then
+                      next_seq=$((suffix + 1))
+                    fi
+                    ;;
+                esac
+              fi
+
+              tag_patch_set_hash="$(read_tag_trailer "${tag}" "Patch-Set-Hash")"
+              if [ -n "${tag_patch_set_hash}" ] && [ "${tag_patch_set_hash}" = "${patch_set_hash}" ]; then
+                duplicate_tag="${tag}"
+                break
+              fi
+
+              tag_tree="$(git rev-parse "${tag}^{tree}")"
+              if [ "${tag_tree}" = "${candidate_tree}" ]; then
+                duplicate_tag="${tag}"
+                break
+              fi
+            done < "${tags_file}"
+            rm -f "${tags_file}"
+          }
+
+          append_matrix_target() {
+            runs_on="${1}"
+            target="${2}"
+            if [ -n "${build_include}" ]; then
+              build_include="${build_include},"
+            fi
+            build_include="${build_include}{\"runs_on\":\"${runs_on}\",\"target\":\"${target}\"}"
+          }
+
+          resolve_backfill_include() {
+            existing_release_tag="${1}"
+            build_include=""
+
+            assets_file="$(mktemp)"
+            if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${existing_release_tag}" --jq '.assets[].name' > "${assets_file}" 2>/dev/null; then
+              echo "Found existing release ${existing_release_tag}; checking per-platform assets"
+            else
+              : > "${assets_file}"
+              echo "Release ${existing_release_tag} not found; all platform assets will be backfilled"
+            fi
+
+            if ! grep -qx 'codex-cnonim-aarch64-apple-darwin.tar.gz' "${assets_file}"; then
+              append_matrix_target "macos-15" "aarch64-apple-darwin"
+            fi
+            if ! grep -qx 'codex-cnonim-x86_64-unknown-linux-gnu.tar.gz' "${assets_file}"; then
+              append_matrix_target "ubuntu-24.04" "x86_64-unknown-linux-gnu"
+            fi
+            rm -f "${assets_file}"
+          }
+
+          resolve_release_mode() {
+            if [ -n "${duplicate_tag}" ]; then
+              suffix="${duplicate_tag#fork/${UPSTREAM_TAG}-}"
+              release_tag="${duplicate_tag}"
+              fork_suffix="cnonim-${suffix}"
+
+              resolve_backfill_include "${duplicate_tag}"
+              if [ -n "${build_include}" ]; then
+                should_build="true"
+                mode="backfill"
+                build_matrix="{\"include\":[${build_include}]}"
+                reason="backfill existing tag ${duplicate_tag}: missing platform artifacts"
+              else
+                should_build="false"
+                mode="skip"
+                build_matrix='{"include":[]}'
+                reason="skip: all platform artifacts already exist for ${duplicate_tag}"
+              fi
+              return 0
+            fi
+
+            should_build="true"
+            mode="new"
+            release_tag="fork/${UPSTREAM_TAG}-${next_seq}"
+            fork_suffix="cnonim-${next_seq}"
+            build_matrix='{"include":[{"runs_on":"macos-15","target":"aarch64-apple-darwin"},{"runs_on":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"}]}'
+            reason="new release ${release_tag}"
+          }
+
+          write_prepare_outputs() {
+            echo "should_build=${should_build}" >> "${GITHUB_OUTPUT}"
+            echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+            echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+            echo "fork_suffix=${fork_suffix}" >> "${GITHUB_OUTPUT}"
+            echo "patch_source_ref=${PATCH_SOURCE_REF}" >> "${GITHUB_OUTPUT}"
+            echo "patch_source_head=${patch_source_head}" >> "${GITHUB_OUTPUT}"
+            echo "patch_set_hash=${patch_set_hash}" >> "${GITHUB_OUTPUT}"
+            echo "build_matrix=${build_matrix}" >> "${GITHUB_OUTPUT}"
+            echo "reason=${reason}" >> "${GITHUB_OUTPUT}"
+          }
+
+          setup_release_branch
+          resolve_patch_context
+          resolve_existing_release_state
+          resolve_release_mode
+          write_prepare_outputs
+          echo "Decision: ${reason}"
+
+      - name: Install Linux build dependencies
+        if: steps.prepare.outputs.should_build == 'true'
+        shell: sh
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        if: steps.prepare.outputs.should_build == 'true'
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cargo check
+        if: steps.prepare.outputs.should_build == 'true'
+        shell: sh
+        env:
+          CODEX_FORK_SUFFIX: ${{ steps.prepare.outputs.fork_suffix }}
+          RUSTFLAGS: --cfg fork_cnonim --check-cfg=cfg(fork_cnonim)
+        run: |
+          set -eu
+          cargo check --target x86_64-unknown-linux-gnu --release --bin codex
+
+      - name: Push release tag (new mode)
+        if: steps.prepare.outputs.should_build == 'true' && steps.prepare.outputs.mode == 'new'
+        shell: sh
+        env:
+          RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ needs.check-release.outputs.upstream_tag }}
+          PATCH_SOURCE_REF: ${{ steps.prepare.outputs.patch_source_ref }}
+          PATCH_SOURCE_HEAD: ${{ steps.prepare.outputs.patch_source_head }}
+          PATCH_SET_HASH: ${{ steps.prepare.outputs.patch_set_hash }}
+        run: |
+          set -eu
+          git tag -a "${RELEASE_TAG}" \
+            -m "Fork release ${RELEASE_TAG} from ${UPSTREAM_TAG}" \
+            -m "Patch-Set-Hash: ${PATCH_SET_HASH}" \
+            -m "Patch-Source-Ref: ${PATCH_SOURCE_REF}" \
+            -m "Patch-Source-Head: ${PATCH_SOURCE_HEAD}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Verify release tag exists (backfill mode)
+        if: steps.prepare.outputs.should_build == 'true' && steps.prepare.outputs.mode == 'backfill'
+        shell: sh
+        env:
+          RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
+        run: |
+          set -eu
+          git fetch origin --tags --force
+          git rev-parse "${RELEASE_TAG}^{commit}" >/dev/null
+
+  build:
+    needs:
+      - check-release
+      - prepare
+    if: needs.check-release.outputs.should_run == 'true' && needs.prepare.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_FORK_SUFFIX: ${{ needs.prepare.outputs.fork_suffix }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      RUSTFLAGS: --cfg fork_cnonim --check-cfg=cfg(fork_cnonim)
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.build_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+          fetch-depth: 1
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: sh
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build codex binary
+        shell: sh
+        run: |
+          set -eu
+          cargo build --target ${{ matrix.target }} --release --bin codex
+
+      - name: Package artifact
+        shell: sh
+        run: |
+          set -eu
+          target="${{ matrix.target }}"
+          mkdir -p dist/"${target}"
+          cp target/"${target}"/release/codex dist/"${target}"/codex
+          tar -C dist/"${target}" -czf dist/codex-cnonim-"${target}".tar.gz codex
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: codex-cnonim-${{ matrix.target }}
+          path: codex-rs/dist/codex-cnonim-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs:
+      - check-release
+      - prepare
+      - build
+    if: needs.check-release.outputs.should_run == 'true' && needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+
+      - name: Generate release notes
+        id: notes
+        shell: sh
+        run: |
+          set -eu
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Fork release for cNoNim/codex"
+            echo
+            echo "- Mode: ${{ needs.prepare.outputs.mode }}"
+            echo "- Upstream tag: ${{ needs.check-release.outputs.upstream_tag }}"
+            echo "- Fork suffix: ${{ needs.prepare.outputs.fork_suffix }}"
+            echo "- Patch source: commits from origin/main with trailer Fork-Patch: yes"
+            echo "- Patch source ref: ${{ needs.prepare.outputs.patch_source_ref }}"
+            echo "- Patch source head: ${{ needs.prepare.outputs.patch_source_head }}"
+            echo "- Patch set hash: ${{ needs.prepare.outputs.patch_set_hash }}"
+          } > "${notes_path}"
+          echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub release (new mode)
+        if: needs.prepare.outputs.mode == 'new'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.release_tag }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: dist/**/*
+          prerelease: ${{ contains(needs.check-release.outputs.upstream_version, '-') }}
+
+      - name: Upload artifacts to existing release (backfill mode)
+        if: needs.prepare.outputs.mode == 'backfill'
+        shell: sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          NOTES_PATH: ${{ steps.notes.outputs.path }}
+        run: |
+          set -eu
+
+          if gh release view "${RELEASE_TAG}" > /dev/null 2>&1; then
+            echo "Using existing release ${RELEASE_TAG}"
+          else
+            gh release create "${RELEASE_TAG}" --title "${RELEASE_TAG}" --notes-file "${NOTES_PATH}"
+          fi
+
+          files_file="$(mktemp)"
+          find dist -type f > "${files_file}"
+          if [ ! -s "${files_file}" ]; then
+            echo "No artifacts found in dist/"
+            exit 1
+          fi
+
+          while IFS= read -r file; do
+            [ -z "${file}" ] && continue
+            gh release upload "${RELEASE_TAG}" "${file}" --clobber
+          done < "${files_file}"
+
+          rm -f "${files_file}"
+
+  notify-conflict:
+    needs:
+      - check-release
+      - prepare
+      - build
+      - release
+    if: needs.check-release.outputs.should_run == 'true' && (needs.prepare.result == 'failure' || needs.build.result == 'failure' || needs.release.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Create failure issue
+        uses: actions/github-script@v8
+        env:
+          UPSTREAM_TAG: ${{ needs.check-release.outputs.upstream_tag }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          PREPARE_REASON: ${{ needs.prepare.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const title = `[cnonim-fork-release] Failed for ${process.env.UPSTREAM_TAG}`;
+            const body = [
+              "Automatic fork release failed.",
+              "",
+              `- Mode: ${process.env.MODE || "n/a"}`,
+              `- Upstream tag: ${process.env.UPSTREAM_TAG}`,
+              `- Prepare result: ${process.env.PREPARE_REASON || "n/a"}`,
+              `- Workflow run: ${process.env.RUN_URL}`,
+            ].join("\n");
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+
+            const duplicate = issues.find((issue) => issue.title === title);
+            if (duplicate) {
+              core.info(`Issue already exists: #${duplicate.number}`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+            });
